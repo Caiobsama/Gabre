@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import math
 import random
+import copy
 
 #Gera as coordenadas dos pontos e as distâncias entre os nós a partir do arquivo .tsp
 def dadosTsp(caminhoArquivo):
@@ -339,96 +340,117 @@ def clientes_mais_proximos(b, Va, distancias, k=7):
 
 def destruir_solucao(rota, ClientesAtendidosLocker, VT, vr=10):
     rota_parcial = rota[:]
+    copia_atrib = copy.deepcopy(ClientesAtendidosLocker)
     removidos = []
     i = 0
-    
-    while i < vr and len(rota_parcial) > 3:    # Se a rota chegar a ter apenas 3 elementos, a destruição para imediatamente (Depósito + 1 cliente + Depósito)
-        # Escolhe aleatoriamente entre remover da rota (0) ou de um locker (1)
+
+    while i < vr and len(rota_parcial) > 3:
         opcao = random.choice([0, 1])
-        
+
         if opcao == 0:
-            # Tenta remover um nó da rota (exceto depósito e VT)
+            # Remover um nó da rota (exceto depósito e VT)
             candidatos = [n for n in rota_parcial[1:-1] if n not in VT]
             if candidatos:
                 x = random.choice(candidatos)
                 rota_parcial.remove(x)
-                if x in ClientesAtendidosLocker:
-                    # Se removeu um locker, todos os seus clientes viram órfãos
-                    clientes_orfaos = ClientesAtendidosLocker[x]
+                if x in copia_atrib and len(copia_atrib[x]) > 0:
+                    # Removeu um locker: seus clientes ficam órfãos
+                    clientes_orfaos = copia_atrib[x][:]
                     removidos.extend(clientes_orfaos)
+                    copia_atrib[x] = []
                     i += len(clientes_orfaos)
                 else:
                     removidos.append(x)
                     i += 1
         else:
-            # Tenta remover um cliente aleatório de algum locker ativo
-            lockers_ativos = [b for b, c in ClientesAtendidosLocker.items() if len(c) > 0 and b in rota_parcial]
+            # Remover um cliente aleatório de algum locker ativo
+            lockers_ativos = [b for b, c in copia_atrib.items() if len(c) > 0 and b in rota_parcial]
             if lockers_ativos:
                 b = random.choice(lockers_ativos)
-                x = random.choice(ClientesAtendidosLocker[b])
+                x = random.choice(copia_atrib[b])
                 if x not in removidos:
+                    copia_atrib[b].remove(x)
                     removidos.append(x)
                     i += 1
-                    
-    return rota_parcial, list(set(removidos))
+
+    return rota_parcial, list(set(removidos)), copia_atrib
     
-def reparar_solucao(rota_parcial, removidos, VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER):
+def reparar_solucao(rota_parcial, removidos, ClientesAtendidosLocker_atual, VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER):
     rota = rota_parcial[:]
-    LockerAberto = {b: (True if b in rota else False) for b in VB}
-    ClientesAtendidosLocker = {b: [] for b in VB} # Reinicia, mas vamos repovoar tudo
-    
-    # 1. Definir quem precisa de atendimento agora
-    # Precisam ser processados: todos os obrigatórios que não estão na rota física
-    # e os opcionais que você deseja tentar manter.
-    clientes_para_processar = [c for c in VT + VC if c not in rota]
-    # Adicionamos os VO que foram removidos para dar chance de voltarem
-    clientes_para_processar = list(set(clientes_para_processar + [c for c in removidos if c in VO]))
+    LockerAberto = {b: (b in rota) for b in VB}
+    ClientesAtendidosLocker = copy.deepcopy(ClientesAtendidosLocker_atual)
 
-    # 2. Reatribuir TODOS os clientes necessários
-    for x in clientes_para_processar:
-        # Tenta encontrar o melhor locker (Método 2)
-        b = escolher_locker_metodo2(x, VB, distancias, matrizCobertura, rota, ClientesAtendidosLocker, CUSTO_CLIENTE_LOCKER)
-        
-        if b is not None:
-            ClientesAtendidosLocker[b].append(x)
-            if not LockerAberto[b]:
-                # Se o locker escolhido não está na rota, insere ele
-                _, pos = insercao_mais_barata(b, rota, distancias)
-                rota.insert(pos, b)
-                LockerAberto[b] = True
-        elif x in VT or x in VC:
-            # Se for obrigatório e não achou locker, TEM que visitar direto
-            _, pos = insercao_mais_barata(x, rota, distancias)
-            rota.insert(pos, x)
+    # Processar apenas os clientes removidos
+    for x in removidos:
+        if x in VT or x in VC:
+            # Obrigatório: procurar melhor locker; se não achar, inserir na rota
+            b = escolher_locker_metodo2(x, VB, distancias, matrizCobertura, rota, ClientesAtendidosLocker, CUSTO_CLIENTE_LOCKER)
+            if b is not None:
+                ClientesAtendidosLocker[b].append(x)
+                if not LockerAberto[b]:
+                    _, pos = insercao_mais_barata(b, rota, distancias)
+                    rota.insert(pos, b)
+                    LockerAberto[b] = True
+            else:
+                _, pos = insercao_mais_barata(x, rota, distancias)
+                rota.insert(pos, x)
 
-    # 3. Limpeza final e atualização de custos
+        elif x in VO:
+            # Opcional: onde fica melhor, rota ou locker?
+            # Primeiro tenta locker já aberto
+            associado = False
+            for b in VB:
+                if LockerAberto[b] and (x, b) in matrizCobertura:
+                    ClientesAtendidosLocker[b].append(x)
+                    associado = True
+                    break
+            if associado:
+                continue
+
+            # Se nenhum aberto atende, comparar abrir novo locker vs visitar direto
+            inc_visita, pos_visita = calcula_incremento(x, rota, distancias)
+            b_candidato = escolher_locker_metodo2(x, VB, distancias, matrizCobertura, rota, ClientesAtendidosLocker, CUSTO_CLIENTE_LOCKER)
+
+            if b_candidato is not None:
+                if b_candidato in rota:
+                    inc_pl = 0
+                else:
+                    inc_pl, pos_pl = calcula_incremento(b_candidato, rota, distancias)
+                custo_cobertura_total = inc_pl + CUSTO_CLIENTE_LOCKER[(x, b_candidato)]
+
+                if custo_cobertura_total < inc_visita:
+                    if not LockerAberto[b_candidato]:
+                        _, pos_pl = insercao_mais_barata(b_candidato, rota, distancias)
+                        rota.insert(pos_pl, b_candidato)
+                        LockerAberto[b_candidato] = True
+                    ClientesAtendidosLocker[b_candidato].append(x)
+                else:
+                    rota.insert(pos_visita, x)
+            else:
+                rota.insert(pos_visita, x)
+
+    # Limpeza final e atualização de custos
     rota, custo_dist = aplicar_2opt(rota, distancias)
     custo_l = sum(CUSTO_CLIENTE_LOCKER[(c, b)] for b, lista in ClientesAtendidosLocker.items() for c in lista)
-    
+
     return rota, (custo_dist + custo_l), custo_dist, custo_l, LockerAberto, ClientesAtendidosLocker
 
-def iterated_greedy(VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER, iter_max=100, k=5):
+def iterated_greedy(VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER, iter_max=100, vr=10):
+    # S = Constroi_SoluçãoVálida() + 2_OPT (já incluído na heurística)
     res_inicial = heuristica(VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER)
-    melhor_sol = list(res_inicial) # [rota, custoT, custoD, custoL, LA, At, CR]
-    
-    rota_atual = melhor_sol[0][:]
-    atrib_atual = melhor_sol[5]
-    custoT_atual = melhor_sol[1]
+    melhor_sol = list(res_inicial)  # [rota, custoT, custoD, custoL, LA, At, CR]
 
     for i in range(iter_max):
-        # Destruição e Reconstrução
-        rota_p, rem = destruir_solucao(rota_atual, atrib_atual, VT, k)
-        res_n = reparar_solucao(rota_p, rem, VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER)
-        
-        # Aceitação Gulosa
-        if res_n[1] < custoT_atual:
-            rota_atual = res_n[0][:]
-            atrib_atual = res_n[5]
-            custoT_atual = res_n[1]
-            
-            if custoT_atual < melhor_sol[1]:
-                melhor_sol = list(res_n) + [[]] # Ajuste para manter formato
-                print(f"Iteração {i}: Novo Melhor Custo Total = {custoT_atual:.2f}")
+        # Destruir sempre a melhor solução (S*)
+        rota_p, rem, atrib_p = destruir_solucao(melhor_sol[0], melhor_sol[5], VT, vr)
+
+        # Reconstruir de forma gulosa
+        res_n = reparar_solucao(rota_p, rem, atrib_p, VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER)
+
+        # Aceitação gulosa: Se S é melhor que S*, S* = S
+        if res_n[1] < melhor_sol[1]:
+            melhor_sol = list(res_n) + [[]]
+            print(f"Iteração {i}: Novo Melhor Custo Total = {res_n[1]:.2f}")
 
     return melhor_sol
 
@@ -553,48 +575,35 @@ if __name__ == "__main__":
             usarCustoDistancia=USAR_DISTANCIA
         )
         
-        rota, custoTotal, custoDist, custoLockers, LockerAberto, ClientesAtendidosLocker, ClientesR = heuristica(
-            VT, VC, VO, VB, distancias, matrizCobertura,CUSTO_CLIENTE_LOCKER, usarMetodo2=True
-        )
-        
-        melhor_sol = iterated_greedy(
-        VT, VC, VO, VB,
-        distancias,
-        matrizCobertura,
-        CUSTO_CLIENTE_LOCKER
-    )
-        
         # 1. Executa Heurística Inicial para ter uma base de comparação
         res_h = heuristica(VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER)
         r_h, cT_h, cD_h, cL_h, LA_h, At_h, _ = res_h
+        print(f"Heurística Inicial. Custo Total: {cT_h:.2f}")
 
         # 2. Executa o Iterated Greedy (IG)
         print("\nIniciando Iterated Greedy...")
         melhor_sol_ig = iterated_greedy(VT, VC, VO, VB, distancias, matrizCobertura, CUSTO_CLIENTE_LOCKER)
-        
-        # 3. DESEMPACOTA os resultados do IG
+
+        # 3. Desempacota os resultados do IG
         r_ig, cT_ig, cD_ig, cL_ig, LA_ig, At_ig = melhor_sol_ig[:6]
 
-        # 4. Agora sim, compara e plota os resultados REAIS
+        # 4. Compara e plota os resultados
         print(f"\n--- RESULTADOS ---")
         print(f"Custo Total ANTES IG: {cT_h:.2f}")
         print(f"Custo Total DEPOIS IG: {cT_ig:.2f}")
 
         plot_cdp_solution(
             coordenadas, depot, VB, VT, VC, VO,
-            r_ig,    # Rota do IG
-            LA_ig,   # Lockers do IG
-            At_ig,   # Atribuições do IG
-            distancias,
-            cT_ig,   # Custo Total do IG
-            cD_ig,   # Distância do IG
-            cL_ig,   # Locker do IG
+            r_ig, LA_ig, At_ig, distancias,
+            cT_ig, cD_ig, cL_ig,
             nome_arquivo="solucao_IG_REAL.png"
         )
 
-        if rota:
-             plot_cdp_solution(coordenadas, depot, VB, VT, VC, VO, rota, LockerAberto, ClientesAtendidosLocker, distancias, custoTotal, custoDist, custoLockers)
-        
-        print(f"\nHeurística Finalizada. Custo Total: {custoTotal:.2f}")
+        plot_cdp_solution(
+            coordenadas, depot, VB, VT, VC, VO,
+            r_h, LA_h, At_h, distancias,
+            cT_h, cD_h, cL_h,
+            nome_arquivo="solucao_heuristica_cdp2.png"
+        )
     else:
         print("Encerrando o script devido a erro na leitura dos dados.")
